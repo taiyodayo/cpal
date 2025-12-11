@@ -1,6 +1,6 @@
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    FromSample, Sample, SizedSample,
+    FromSample, SizedSample,
 };
 use std::f32::consts::PI;
 
@@ -63,7 +63,7 @@ fn run<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
 ) -> Result<(), anyhow::Error> {
-    let sample_rate = config.sample_rate.0 as f32;
+    let sample_rate = config.sample_rate as f32;
     let channels = config.channels as usize;
 
     let mut osc = SweepOscillator::new(

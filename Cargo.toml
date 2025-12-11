@@ -59,6 +59,7 @@ hound = "3.5"
 ringbuf = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
+device_query = "2.1.0"                            # <--- Add this line for keyboard input
 
 # Support a range of versions in order to avoid duplication of this crate. Make sure to test all
 # versions when bumping to a new release, and only increase the minimum when absolutely necessary.

@@ -1,14 +1,14 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use device_query::{DeviceQuery, DeviceState, Keycode};
-use std::sync::{Arc, Mutex};
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex}; // Import Write for flushing stdout
 
 // ==========================================
 // CONFIGURATION
 // ==========================================
-const NUM_OSCS: usize = 7; // Classic SuperSaw has 7 layers
-const DETUNE_AMOUNT: f32 = 0.25; // 0.0 = Thin, 0.5 = Very Wide/Dissonant
-const MASTER_VOLUME: f32 = 0.15; // Lower volume to prevent distortion
+const NUM_OSCS: usize = 7;
+const MASTER_VOLUME: f32 = 0.15;
 
 // ==========================================
 // SUPERSAW ENGINE
@@ -26,123 +26,146 @@ impl SuperSaw {
         }
     }
 
-    pub fn tick(&mut self, freq: f32) -> f32 {
+    // Now accepts `detune` as a parameter
+    pub fn tick(&mut self, freq: f32, detune: f32) -> f32 {
         if freq <= 0.0 {
             return 0.0;
         }
 
         let mut output = 0.0;
 
-        // We use a quadratic curve for spread so small detune amounts
-        // give subtle phasing, while large ones give the "swarm" effect.
-        let spread_max = 0.03; // Max 3% frequency deviation
-        let current_spread = DETUNE_AMOUNT * DETUNE_AMOUNT * spread_max;
+        // Spread calculation
+        let spread_max = 0.04;
+        // Square the detune so 0.0 is pure, and 1.0 is MASSIVE
+        let current_spread = detune * detune * spread_max;
 
         for i in 0..NUM_OSCS {
-            // Calculate oscillator offset (-3, -2, -1, 0, 1, 2, 3)
             let offset_factor = (i as f32) - 3.0;
-
-            // Calculate the detuned frequency for this specific layer
             let osc_freq = freq * (1.0 + (offset_factor * current_spread));
 
-            // 1. Generate Naive Sawtooth Wave: Range [-1.0, 1.0]
-            // Formula: (phase * 2) - 1
+            // Saw Wave
             let saw_sample = (self.phases[i] * 2.0) - 1.0;
-
             output += saw_sample;
 
-            // 2. Advance Phase
+            // Advance Phase
             self.phases[i] += osc_freq / self.sample_rate;
             if self.phases[i] >= 1.0 {
                 self.phases[i] -= 1.0;
             }
         }
 
-        // Normalize: Divide by 7 oscillators so we don't clip
-        // Then apply master volume
         (output / NUM_OSCS as f32) * MASTER_VOLUME
     }
+}
+
+// ==========================================
+// SHARED STATE
+// ==========================================
+// We pack both variables into a struct to keep things organized
+struct SynthState {
+    frequency: f32,
+    detune: f32,
 }
 
 // ==========================================
 // MAIN APPLICATION
 // ==========================================
 fn main() -> Result<(), anyhow::Error> {
-    // 1. Setup Audio Host
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .expect("no output device available");
+    let device = host.default_output_device().expect("no output device");
     let config = device.default_output_config()?;
 
     println!("\n+---------------------------------------------------+");
-    println!("|  RUST SUPER-SAW SYNTHESIZER                       |");
+    println!("|  RUST SUPER-SAW SYNTHESIZER v2                    |");
     println!("+---------------------------------------------------+");
-    println!("|  Controls:                                        |");
-    println!("|  [Z] [X] [C] [V] [B] [N] [M]  -> Natural Notes    |");
-    println!("|   [S] [D]     [G] [H] [J]     -> Sharp/Flat Keys  |");
-    println!("|                                                   |");
-    println!("|  Hold keys to play. Press [ESC] to quit.          |");
+    println!("|  [Z]..[M] -> Play Notes                           |");
+    println!("|  [1]      -> Increase Detune (Fatter)             |");
+    println!("|  [2]      -> Decrease Detune (Thinner)            |");
+    println!("|  [ESC]    -> Quit                                 |");
     println!("+---------------------------------------------------+");
 
-    // 2. Shared State for Frequency Control
-    // The main thread writes to this, the audio thread reads from it.
-    let current_freq = Arc::new(Mutex::new(0.0f32));
-    let freq_clone = current_freq.clone();
+    // Initial State: 0Hz, 0.25 Detune amount
+    let state = Arc::new(Mutex::new(SynthState {
+        frequency: 0.0,
+        detune: 0.25,
+    }));
 
-    // 3. Start the Audio Stream
+    let state_clone = state.clone();
+
+    // Start Audio Stream
     let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => run_stream::<f32>(&device, &config.into(), freq_clone),
-        cpal::SampleFormat::I16 => run_stream::<i16>(&device, &config.into(), freq_clone),
+        cpal::SampleFormat::F32 => run_stream::<f32>(&device, &config.into(), state_clone),
+        cpal::SampleFormat::I16 => run_stream::<i16>(&device, &config.into(), state_clone),
         fmt => panic!("Unsupported format: {}", fmt),
     }?;
 
     stream.play()?;
 
-    // 4. Keyboard Input Loop (Main Thread)
     let device_state = DeviceState::new();
+    let mut last_printed_detune = -1.0; // To prevent spamming the console
+
     loop {
         let keys: Vec<Keycode> = device_state.get_keys();
-
         if keys.contains(&Keycode::Escape) {
             break;
         }
 
-        // Detect which note to play
-        // Priority: If multiple keys are pressed, the last one checked wins
         let mut target_freq = 0.0;
+        let mut detune_change = 0.0;
 
-        // Iterate over keys to find a match
-        for key in keys {
+        // 1. Check for Detune Keys
+        if keys.contains(&Keycode::Key1) {
+            detune_change = 0.005;
+        }
+        if keys.contains(&Keycode::Key2) {
+            detune_change = -0.005;
+        }
+
+        // 2. Check for Note Keys
+        for key in &keys {
             let f = match key {
-                // Lower Octave
-                Keycode::Z => 261.63,     // C4
-                Keycode::S => 277.18,     // C#4
-                Keycode::X => 293.66,     // D4
-                Keycode::D => 311.13,     // D#4
-                Keycode::C => 329.63,     // E4
-                Keycode::V => 349.23,     // F4
-                Keycode::G => 369.99,     // F#4
-                Keycode::B => 392.00,     // G4
-                Keycode::H => 415.30,     // G#4
-                Keycode::N => 440.00,     // A4
-                Keycode::J => 466.16,     // A#4
-                Keycode::M => 493.88,     // B4
-                Keycode::Comma => 523.25, // C5
+                Keycode::Z => 261.63,
+                Keycode::S => 277.18,
+                Keycode::X => 293.66,
+                Keycode::D => 311.13,
+                Keycode::C => 329.63,
+                Keycode::V => 349.23,
+                Keycode::G => 369.99,
+                Keycode::B => 392.00,
+                Keycode::H => 415.30,
+                Keycode::N => 440.00,
+                Keycode::J => 466.16,
+                Keycode::M => 493.88,
+                Keycode::Comma => 523.25,
                 _ => 0.0,
             };
-
             if f > 0.0 {
                 target_freq = f;
             }
         }
 
-        // Update the audio thread
-        if let Ok(mut lock) = current_freq.lock() {
-            *lock = target_freq;
+        // 3. Update Shared State
+        let mut current_detune_display = 0.0;
+        if let Ok(mut lock) = state.lock() {
+            lock.frequency = target_freq;
+
+            // Apply detune change and clamp between 0.0 and 1.0
+            lock.detune = (lock.detune + detune_change).clamp(0.0, 1.0);
+            current_detune_display = lock.detune;
         }
 
-        // Small sleep to reduce CPU usage in the input loop
+        // 4. Update Display (Only if detune changed significantly)
+        if (current_detune_display - last_printed_detune).abs() > 0.001 {
+            // \r returns cursor to start of line, allowing us to overwrite it
+            print!(
+                "\r Detune Amount: {:.1}% | Playing: {:.1} Hz      ",
+                current_detune_display * 100.0,
+                target_freq
+            );
+            io::stdout().flush().unwrap();
+            last_printed_detune = current_detune_display;
+        }
+
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
@@ -152,43 +175,49 @@ fn main() -> Result<(), anyhow::Error> {
 fn run_stream<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    shared_freq: Arc<Mutex<f32>>,
+    shared_state: Arc<Mutex<SynthState>>,
 ) -> Result<cpal::Stream, anyhow::Error> {
     let sample_rate = config.sample_rate as f32;
     let channels = config.channels as usize;
 
     let mut synth = SuperSaw::new(sample_rate);
 
-    // Smoothers to prevent clicking
+    // Smoothing variables
     let mut smoothed_freq = 0.0;
     let mut amp_envelope = 0.0;
+    // We also smooth detune so it doesn't jump abruptly when you press 1 or 2
+    let mut smoothed_detune = 0.25;
 
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _| {
-            let target_freq = *shared_freq.lock().unwrap();
+            // Read state once per buffer to save locking overhead
+            let (target_freq, target_detune) = {
+                let lock = shared_state.lock().unwrap();
+                (lock.frequency, lock.detune)
+            };
 
             for frame in data.chunks_mut(channels) {
-                // 1. Smooth Frequency (Glide / Portamento)
+                // Glide frequency
                 if target_freq > 0.0 {
-                    // Slide towards target
                     smoothed_freq = smoothed_freq * 0.92 + target_freq * 0.08;
                 }
 
-                // 2. Smooth Amplitude (Attack / Release)
+                // Glide detune (slower glide for smooth morphing)
+                smoothed_detune = smoothed_detune * 0.95 + target_detune * 0.05;
+
+                // Envelope
                 let target_amp = if target_freq > 0.0 { 1.0 } else { 0.0 };
-                // Fast attack, slightly slower release
                 amp_envelope = amp_envelope * 0.9 + target_amp * 0.1;
 
-                // 3. Generate Sound
-                // If the envelope is basically silent, output 0 to save math
+                // Generate
                 let sample = if amp_envelope < 0.001 {
                     0.0
                 } else {
-                    synth.tick(smoothed_freq) * amp_envelope
+                    // Pass the smoothed detune into the synth
+                    synth.tick(smoothed_freq, smoothed_detune) * amp_envelope
                 };
 
-                // 4. Fill Channels
                 for s in frame.iter_mut() {
                     *s = T::from_sample(sample);
                 }

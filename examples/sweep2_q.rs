@@ -5,7 +5,7 @@ use cpal::{
 use std::f32::consts::PI;
 
 const TWO_PI: f32 = 2.0 * PI;
-const DURATION_SECS: f32 = 0.3;
+const DURATION_SECS: f32 = 0.2;
 
 struct SweepOscillator {
     phase: f32,

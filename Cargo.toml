@@ -14,10 +14,7 @@ rust-version = "1.70"
 # Provides low-latency audio I/O by bypassing the Windows audio stack
 # Requires: ASIO drivers and LLVM/Clang for build-time bindings
 # See README for detailed setup instructions
-asio = [
-    "dep:asio-sys",
-    "dep:num-traits",
-]
+asio = ["dep:asio-sys", "dep:num-traits"]
 
 # JACK Audio Connection Kit backend
 # Provides low-latency connections between applications and audio hardware
@@ -61,6 +58,7 @@ anyhow = "1.0"
 hound = "3.5"
 ringbuf = "0.4"
 clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.28"
 
 # Support a range of versions in order to avoid duplication of this crate. Make sure to test all
 # versions when bumping to a new release, and only increase the minimum when absolutely necessary.

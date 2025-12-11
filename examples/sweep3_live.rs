@@ -3,7 +3,7 @@ use cpal::{
     FromSample, SizedSample,
 };
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,14 +40,13 @@ impl SweepOscillator {
     }
 
     fn tick(&mut self) -> f32 {
-        // Update direction based on key state
+        // Update direction based on toggle state
         if self.reversed.load(Ordering::Relaxed) {
             self.current_sample = (self.current_sample - 1.0).max(0.0);
         } else {
             self.current_sample = (self.current_sample + 1.0).min(self.duration_samples);
         }
 
-        // Check if at end (silence)
         if self.current_sample >= self.duration_samples {
             return 0.0;
         }
@@ -55,7 +54,6 @@ impl SweepOscillator {
         let t = self.current_sample / self.duration_samples;
         let freq = self.start_freq * (self.end_freq / self.start_freq).powf(t);
 
-        // Sawtooth wave
         let sample = 2.0 * self.phase - 1.0;
 
         self.phase = (self.phase + freq / self.sample_rate) % 1.0;
@@ -69,47 +67,46 @@ fn main() -> Result<(), anyhow::Error> {
     let device = host.default_output_device().expect("no output device");
     let config = device.default_output_config()?;
 
-    // Shared state for key press
-    let key_pressed = Arc::new(AtomicBool::new(false));
-    let key_pressed_clone = Arc::clone(&key_pressed);
+    let reversed = Arc::new(AtomicBool::new(false));
+    let reversed_clone = Arc::clone(&reversed);
 
-    // Enable raw mode for keyboard input
-    enable_raw_mode()?;
-
-    println!("Sweep started. Hold any key to reverse. Press 'q' to quit.\r");
-
-    // Spawn keyboard monitoring thread
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
 
+    enable_raw_mode()?;
+
+    println!("Sweep started. Press any key to toggle direction. Press 'q' to quit.\r");
+
+    // Keyboard monitoring thread
     std::thread::spawn(move || {
         while running_clone.load(Ordering::Relaxed) {
             if event::poll(Duration::from_millis(10)).unwrap_or(false) {
                 if let Ok(Event::Key(key_event)) = event::read() {
-                    // Quit on 'q'
-                    if key_event.code == event::KeyCode::Char('q') {
+                    // Only react to key press, ignore repeat/release
+                    if key_event.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    if key_event.code == KeyCode::Char('q') {
                         running_clone.store(false, Ordering::Relaxed);
                         break;
                     }
 
-                    match key_event.kind {
-                        KeyEventKind::Press => {
-                            key_pressed_clone.store(true, Ordering::Relaxed);
-                        }
-                        KeyEventKind::Release => {
-                            key_pressed_clone.store(false, Ordering::Relaxed);
-                        }
-                        _ => {}
-                    }
+                    // Toggle direction
+                    let current = reversed_clone.load(Ordering::Relaxed);
+                    reversed_clone.store(!current, Ordering::Relaxed);
+
+                    let direction = if !current { "↑ UP" } else { "↓ DOWN" };
+                    println!("Direction: {}\r", direction);
                 }
             }
         }
     });
 
     match config.sample_format() {
-        cpal::SampleFormat::F32 => run::<f32>(&device, &config.into(), key_pressed, &running),
-        cpal::SampleFormat::I16 => run::<i16>(&device, &config.into(), key_pressed, &running),
-        cpal::SampleFormat::I32 => run::<i32>(&device, &config.into(), key_pressed, &running),
+        cpal::SampleFormat::F32 => run::<f32>(&device, &config.into(), reversed, &running),
+        cpal::SampleFormat::I16 => run::<i16>(&device, &config.into(), reversed, &running),
+        cpal::SampleFormat::I32 => run::<i32>(&device, &config.into(), reversed, &running),
         fmt => panic!("Unsupported format: {fmt}"),
     }?;
 
@@ -122,23 +119,15 @@ fn main() -> Result<(), anyhow::Error> {
 fn run<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    key_pressed: Arc<AtomicBool>,
+    reversed: Arc<AtomicBool>,
     running: &Arc<AtomicBool>,
 ) -> Result<(), anyhow::Error> {
     let sample_rate = config.sample_rate as f32;
     let channels = config.channels as usize;
 
-    // Sweep A: 20kHz → 10Hz
-    let mut osc_a =
-        SweepOscillator::new(sample_rate, 20_000.0, 10.0, 10.0, Arc::clone(&key_pressed));
-
-    // Sweep B: 10kHz → 10Hz
-    let mut osc_b =
-        SweepOscillator::new(sample_rate, 10_000.0, 10.0, 10.0, Arc::clone(&key_pressed));
-
-    // Sweep C: 5kHz → 10Hz
-    let mut osc_c =
-        SweepOscillator::new(sample_rate, 5_000.0, 10.0, 10.0, Arc::clone(&key_pressed));
+    let mut osc_a = SweepOscillator::new(sample_rate, 20_000.0, 10.0, 10.0, Arc::clone(&reversed));
+    let mut osc_b = SweepOscillator::new(sample_rate, 10_000.0, 10.0, 10.0, Arc::clone(&reversed));
+    let mut osc_c = SweepOscillator::new(sample_rate, 5_000.0, 10.0, 10.0, Arc::clone(&reversed));
 
     let stream = device.build_output_stream(
         config,
@@ -155,7 +144,6 @@ fn run<T: SizedSample + FromSample<f32>>(
 
     stream.play()?;
 
-    // Wait until 'q' is pressed
     while running.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(50));
     }

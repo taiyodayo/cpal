@@ -528,6 +528,7 @@ impl Device {
             // See https://github.com/thestk/rtaudio/blob/master/RtAudio.cpp#L1369C1-L1375C39
 
             property_address.mSelector = kAudioDevicePropertyAvailableNominalSampleRates;
+            property_address.mScope = kAudioObjectPropertyScopeGlobal;
             let mut data_size = 0u32;
             let status = AudioObjectGetPropertyDataSize(
                 self.audio_device_id,
